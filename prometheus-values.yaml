@@ -1,0 +1,45 @@
+# prometheus-values.yaml
+# Configurations for Prometheus Operator on GKE to monitor vLLM.
+
+# Disable components that access restricted host paths or kube-system
+kubeControllerManager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+coreDns:
+  enabled: false
+kubeDns:
+  enabled: false
+
+nodeExporter:
+  enabled: false
+
+prometheus-node-exporter:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # Discover and scrape all PodMonitors globally in the cluster
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    
+    # Storage settings for persistent metrics history on GCP
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard-rwo
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+grafana:
+  adminPassword: "admin-gke-mlops"
+  persistence:
+    enabled: true
+    storageClassName: standard-rwo
+    size: 5Gi
