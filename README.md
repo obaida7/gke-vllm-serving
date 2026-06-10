@@ -36,22 +36,22 @@ Configure Google Cloud Services, create a GCS bucket to act as your model regist
 
 Run the setup script:
 ```bash
-chmod +x gcp-setup.sh
-./gcp-setup.sh
+chmod +x scripts/gcp-setup.sh
+./scripts/gcp-setup.sh
 ```
 
 ### 2. GKE Autopilot Cluster Provisioning
 Provision a GKE Autopilot cluster. GKE Autopilot automatically manages node auto-provisioning and dynamically installs the correct NVIDIA GPU drivers when a GPU pod is requested.
 ```bash
-chmod +x gke-cluster-setup.sh
-./gke-cluster-setup.sh
+chmod +x scripts/gke-setup.sh
+./scripts/gke-setup.sh
 ```
 
 ### 3. Model Quantization & Upload
 To optimize VRAM footprint and throughput, quantize the model weights (e.g., AWQ 4-bit) and upload them to your GCS registry.
 ```bash
 # Quantize weights (requires a GPU-enabled workspace)
-python3 quantize_awq.py
+python3 scripts/quantize_awq.py
 
 # Upload model directory to GCS
 gcloud storage cp -r ./Qwen2.5-0.5B-Instruct-AWQ gs://<YOUR-PROJECT-ID>-ml-model-registry/
@@ -60,7 +60,7 @@ gcloud storage cp -r ./Qwen2.5-0.5B-Instruct-AWQ gs://<YOUR-PROJECT-ID>-ml-model
 ### 4. Deploy vLLM
 Deploy the vLLM deployment, service account, and service:
 ```bash
-kubectl apply -f vllm-gke-deployment.yaml
+kubectl apply -f k8s/deployment.yaml
 ```
 *Note: GKE Autopilot will detect the `nvidia.com/gpu: 1` request and dynamically provision an `nvidia-l4` node. This process takes 2-4 minutes.*
 
@@ -71,7 +71,7 @@ kubectl apply -f vllm-gke-deployment.yaml
 GKE Autopilot enforces strict namespace boundaries and disallows host-privileged DaemonSets. Installing standard Helm charts like `kube-prometheus-stack` out-of-the-box fails. 
 
 ### 1. Install Prometheus and Grafana (Autopilot Compatible)
-We bypass these restrictions by using [prometheus-values.yaml](prometheus-values.yaml) to disable node-exporters and restricted control-plane metrics.
+We bypass these restrictions by using [prometheus-values.yaml](monitoring/prometheus-values.yaml) to disable node-exporters and restricted control-plane metrics.
 
 ```bash
 kubectl create namespace monitoring || true
@@ -79,13 +79,13 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update
 helm install prometheus prometheus-community/kube-prometheus-stack \
     -n monitoring \
-    -f prometheus-values.yaml
+    -f monitoring/prometheus-values.yaml
 ```
 
 ### 2. Scrape vLLM Metrics
-Apply the [vllm-service-monitor.yaml](vllm-service-monitor.yaml) configuration to register vLLM with the Prometheus target collector:
+Apply the [service-monitor.yaml](k8s/service-monitor.yaml) configuration to register vLLM with the Prometheus target collector:
 ```bash
-kubectl apply -f vllm-service-monitor.yaml
+kubectl apply -f k8s/service-monitor.yaml
 ```
 *Note: vLLM serves prometheus metrics on its main OpenAI API port (8000) under `/metrics`. The ServiceMonitor points to the `http` service endpoint to map this correctly.*
 
@@ -102,13 +102,13 @@ kubectl port-forward svc/qwen-vllm-service 8000:80 -n kserve-test &
 ### 4. Import Grafana Dashboard
 1. Open Grafana at `http://localhost:3000` (User: `admin` / Password: `admin-gke-mlops`).
 2. Go to **Dashboards > New > Import**.
-3. Copy-paste the content of [vllm-grafana-dashboard.json](vllm-grafana-dashboard.json) (or upload the file) and select the `Prometheus` datasource.
+3. Copy-paste the content of [grafana-dashboard.json](monitoring/grafana-dashboard.json) (or upload the file) and select the `Prometheus` datasource.
 
 ---
 
 ## 🧪 Load Testing (Locust)
 
-The [locustfile.py](locustfile.py) load test sends streaming requests (`stream: true`) to the vLLM endpoint and calculates **TTFT (Time-to-First-Token)** and **ITL (Inter-Token Latency)** client-side.
+The [locustfile.py](load-test/locustfile.py) load test sends streaming requests (`stream: true`) to the vLLM endpoint and calculates **TTFT (Time-to-First-Token)** and **ITL (Inter-Token Latency)** client-side.
 
 Run a headless load test simulating 5 concurrent users for 2 minutes:
 ```bash
