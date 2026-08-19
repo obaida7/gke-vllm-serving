@@ -4,6 +4,7 @@ metadata:
   name: qwen-vllm
   namespace: kserve-test
   annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
     autoscaling.knative.dev/min-scale: "1"
     autoscaling.knative.dev/target: "10"
 spec:
