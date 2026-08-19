@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-serving-sa
+  namespace: kserve-test
+  annotations:
+    iam.gke.io/gcp-service-account: gke-model-puller@project-24b1427f-85ff-418c-a1d.iam.gserviceaccount.com
