@@ -1,0 +1,59 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: qwen-vllm
+  namespace: kserve-test
+  annotations:
+    autoscaling.knative.dev/min-scale: "1"
+    autoscaling.knative.dev/target: "10"
+spec:
+  predictor:
+    containerConcurrency: 100
+    serviceAccountName: vllm-serving-sa
+    annotations:
+      gke-gcsfuse/volumes: "true"
+    containers:
+      - name: kserve-container
+        image: vllm/vllm-openai:v0.4.3
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+          - "--model=/mnt/models/Qwen2.5-0.5B-Instruct"
+          - "--port=8080"
+          - "--gpu-memory-utilization=0.90"
+          - "--max-model-len=4096"
+          - "--enable-prefix-caching"
+          - "--otlp-traces-endpoint=http://jaeger-collector.monitoring.svc.cluster.local:4317"
+        ports:
+          - containerPort: 8080
+            protocol: TCP
+        env:
+          - name: enableServiceLinks
+            value: "false"
+        resources:
+          limits:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: "1"
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+          - name: gcs-model-volume
+            mountPath: /mnt/models
+            readOnly: true
+          - name: shm
+            mountPath: /dev/shm
+    nodeSelector:
+      cloud.google.com/gke-accelerator: nvidia-l4
+    volumes:
+      - name: gcs-model-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: project-24b1427f-85ff-418c-a1d-ml-model-registry
+            mountOptions: "implicit-dirs"
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

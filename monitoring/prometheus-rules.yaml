@@ -1,0 +1,30 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: vllm-slo-alerts
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: vllm.rules
+    rules:
+    # SLO: 99% of requests must have Time-To-First-Token (TTFT) < 500ms
+    - alert: HighTime-To-First-Token
+      expr: histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le)) > 0.5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High TTFT on vLLM"
+        description: "99th percentile Time-To-First-Token is > 500ms for 5 minutes."
+    
+    # SLO: Error rate must be < 1%
+    - alert: HighErrorRate
+      expr: sum(rate(vllm:request_success_total{success="false"}[5m])) / sum(rate(vllm:request_prompt_tokens_total[5m])) > 0.01
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "High Error Rate on vLLM"
+        description: "More than 1% of requests are failing."

@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: kserve-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+      - name: litellm
+        image: ghcr.io/berriai/litellm:main-latest
+        ports:
+        - containerPort: 4000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://litellm:litellm-secure-password@postgres:5432/litellm"
+        - name: LITELLM_MASTER_KEY
+          value: "sk-litellm-master-key" # In production, use a Secret for this
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://jaeger-collector.monitoring.svc.cluster.local:4317"
+        - name: REDIS_HOST
+          value: "litellm-redis"
+        - name: REDIS_PORT
+          value: "6379"
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        volumeMounts:
+        - name: litellm-config-volume
+          mountPath: /app/config.yaml
+          subPath: config.yaml
+        args:
+        - "--config"
+        - "/app/config.yaml"
+      volumes:
+      - name: litellm-config-volume
+        configMap:
+          name: litellm-config
