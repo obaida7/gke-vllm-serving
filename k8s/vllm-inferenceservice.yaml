@@ -46,7 +46,7 @@ spec:
           - name: shm
             mountPath: /dev/shm
     nodeSelector:
-      cloud.google.com/gke-accelerator: nvidia-l4
+      cloud.google.com/gke-accelerator: nvidia-tesla-t4
     volumes:
       - name: gcs-model-volume
         csi:
