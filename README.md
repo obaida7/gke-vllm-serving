@@ -1,131 +1,103 @@
-# Deploying and Monitoring vLLM on GKE Autopilot with NVIDIA L4 GPU
+# Enterprise LLM Serving Architecture on GKE Autopilot
 
-This repository contains the complete infrastructure code, configuration manifests, and load-testing scripts to deploy a production-grade, auto-instrumented **vLLM** engine serving a quantized **Qwen2.5-0.5B-Instruct** model on **Google Kubernetes Engine (GKE) Autopilot**.
+This repository demonstrates a production-grade, highly scalable, and observable architecture for serving Large Language Models (LLMs) on Google Kubernetes Engine (GKE). It is designed to bridge the gap between AI Engineering and MLOps, focusing on reliability, cost-control, and GitOps deployment practices.
 
-It features automated GCS Fuse CSI model mounting, custom vLLM metrics scraping via Prometheus Operator, and real-time visualization in Grafana.
-
----
-
-## 🏗️ Architecture Overview
+## 🏗 Architecture Diagram
 
 ```mermaid
-graph TD
-    Client[Locust Load Test] -->|HTTP Requests| Service[Service: qwen-vllm-service]
-    Service -->|Port 80 -> 8000| Pod[Pod: qwen-vllm]
+flowchart TD
+    subgraph "External"
+        User[User / Client App]
+    end
+
+    subgraph "GKE Autopilot Cluster"
+        subgraph "Ingress & Routing (LiteLLM)"
+            Gateway[LiteLLM API Gateway]
+            Redis[(Redis Cache & Rate Limit)]
+            Postgres[(PostgreSQL DB)]
+        end
+
+        subgraph "Model Serving (KServe / Knative)"
+            vLLM[vLLM Inference Server]
+        end
+
+        subgraph "Observability & CD"
+            Argo[ArgoCD GitOps]
+            Prometheus[Prometheus / Grafana]
+            Jaeger[Jaeger Tracing OTLP]
+        end
+    end
+
+    subgraph "Google Cloud Platform"
+        GCS[(GCS Bucket: Model Weights)]
+    end
+
+    %% Flow
+    User -- "OpenAI API Request" --> Gateway
+    Gateway <--> Redis
+    Gateway <--> Postgres
+    Gateway -- "Forward Request" --> vLLM
+    vLLM -- "Stream Model Weights" --> GCS
     
-    %% Storage %%
-    Pod -->|GCS Fuse Mount| GCS[(GCS Model Registry)]
+    %% Telemetry
+    Gateway -. "Traces" .-> Jaeger
+    vLLM -. "Traces & Metrics" .-> Jaeger
+    Gateway -. "Metrics" .-> Prometheus
+    vLLM -. "Metrics" .-> Prometheus
     
-    %% Monitoring %%
-    Prom[Prometheus Operator] -->|Scrapes /metrics on Port 8000| Service
-    Prom -->|Feeds Data| Grafana[Grafana Dashboard]
+    %% GitOps
+    Argo -. "Sync Manifests" .-> Gateway
+    Argo -. "Sync Manifests" .-> vLLM
 ```
 
-*   **Model Serving:** vLLM (`v0.4.3`) deployed on a single NVIDIA L4 GPU (24GB VRAM).
-*   **Weights Storage:** Dynamic GCS Fuse CSI driver volume mount (no local disk/PV pre-warming needed).
-*   **Telemetry:** Kube-Prometheus-Stack adapted for GKE Autopilot security policies.
-*   **Scraping:** Custom `ServiceMonitor` targeting vLLM metrics endpoint.
-*   **Load Testing:** Headless Locust test capturing streaming TTFT and ITL client-side statistics.
+## 🚀 Key Components
+
+1. **LiteLLM Gateway:** Acts as the entry point, providing an OpenAI-compatible API. It handles authentication, per-project budgets, rate limiting (via **Redis**), routing, and fallbacks. Configuration is stored in **PostgreSQL**.
+2. **KServe & vLLM:** KServe manages the lifecycle of the model endpoints (InferenceServices). **vLLM** acts as the high-throughput inference engine, leveraging PagedAttention for optimal GPU memory utilization.
+3. **GCS Fuse CSI:** Model weights (like Qwen 0.5B) are stored in Google Cloud Storage. Instead of baking weights into massive Docker images, GCS Fuse dynamically mounts the bucket directly into the vLLM container at startup.
+4. **Observability:** Distributed tracing is handled via OpenTelemetry (OTLP) exporting to **Jaeger**. Metrics are scraped by **Prometheus** and visualized in **Grafana**.
+5. **GitOps:** **ArgoCD** continuously monitors this Git repository and ensures the cluster state matches the declarative manifests.
 
 ---
 
-## 🚀 Step-by-Step Deployment Guide
+## 🛠 Production Operations & Interview Talking Points
 
-### 1. GCP Infrastructure Setup
-Configure Google Cloud Services, create a GCS bucket to act as your model registry, and configure a Google Service Account (GSA) bound to the Kubernetes Service Account (KSA) using GKE Workload Identity.
+### 1. Autoscaling & Scale-to-Zero
+* **Knative Serving:** Under the hood, KServe utilizes Knative. This allows the InferenceService to scale down to **zero pods** when there is no traffic, ensuring we don't pay for idle GPUs.
+* **GKE Autopilot Autoscaler:** When Knative scales the deployment up from 0 to 1, GKE Autopilot intercepts the pod's resource requests (e.g., 1 NVIDIA T4 GPU) and dynamically provisions a compute node to fulfill it. When the pod terminates, Autopilot deletes the node.
 
-Run the setup script:
-```bash
-chmod +x scripts/gcp-setup.sh
-./scripts/gcp-setup.sh
-```
+### 2. GPU Memory Management (vLLM)
+GPU memory (VRAM) is the most critical bottleneck in LLM serving. This architecture utilizes vLLM to optimize it:
+* **PagedAttention:** Radically reduces memory waste in the KV cache, allowing for larger batch sizes.
+* **`--gpu-memory-utilization`:** Configured to `0.90` (90%), explicitly telling vLLM to reserve 90% of the VRAM for the KV cache and weights, leaving 10% for PyTorch overhead.
+* **`--max-model-len`:** Capped at 4096 tokens to prevent out-of-memory (OOM) errors from users submitting massive context windows.
+* **Prefix Caching:** Enabled (`--enable-prefix-caching`) so if multiple users send prompts with the same system instructions, the KV cache for that prefix is shared, saving massive amounts of VRAM.
 
-### 2. GKE Autopilot Cluster Provisioning
-Provision a GKE Autopilot cluster. GKE Autopilot automatically manages node auto-provisioning and dynamically installs the correct NVIDIA GPU drivers when a GPU pod is requested.
-```bash
-chmod +x scripts/gke-setup.sh
-./scripts/gke-setup.sh
-```
+### 3. Cost Control & Rate Limiting
+Serving LLMs can get expensive rapidly. 
+* **LiteLLM Budgets:** We use LiteLLM backed by Redis to enforce strict API rate limits and monthly cost budgets per API key. If a user tries to scrape the endpoint, LiteLLM blocks them before the request even reaches the expensive GPU.
+* **Spot Instances:** In a true production environment, GKE Autopilot can be configured to provision *Spot* GPU instances for non-critical batch processing, saving up to 70% on compute costs.
 
-### 3. Model Quantization & Upload
-To optimize VRAM footprint and throughput, quantize the model weights (e.g., AWQ 4-bit) and upload them to your GCS registry.
-```bash
-# Quantize weights (requires a GPU-enabled workspace)
-python3 scripts/quantize_awq.py
+### 4. Distributed Tracing & Monitoring
+Because an LLM request passes through a Gateway, a Service Mesh, and an Inference Engine, debugging latency is difficult.
+* **Jaeger OTLP:** Both LiteLLM and vLLM are configured to emit OpenTelemetry traces to Jaeger. A single trace ID follows the request from the moment the user hits LiteLLM to the exact millisecond vLLM starts generating tokens.
+* **Prometheus:** Scrapes GPU utilization, KV cache usage, and token generation speeds from vLLM to trigger alerts if throughput degrades.
 
-# Upload model directory to GCS
-gcloud storage cp -r ./Qwen2.5-0.5B-Instruct-AWQ gs://<YOUR-PROJECT-ID>-ml-model-registry/
-```
-
-### 4. Deploy vLLM
-Deploy the vLLM deployment, service account, and service:
-```bash
-kubectl apply -f k8s/deployment.yaml
-```
-*Note: GKE Autopilot will detect the `nvidia.com/gpu: 1` request and dynamically provision an `nvidia-l4` node. This process takes 2-4 minutes.*
+### 5. Troubleshooting Common GCP Quota Issues
+When deploying GPUs on Google Cloud, you will inevitably hit provisioning errors. Knowing the difference is crucial:
+* **`GCE quota exceeded`:** Your Google Cloud Billing Account has a hard limit of `0` for that specific GPU type (e.g., L4 GPUs). You must request a quota increase in the GCP IAM Console.
+* **`GCE out of resources`:** You *do* have quota, but the physical Google Cloud datacenter in that specific zone (e.g., `us-central1-b`) is completely sold out of hardware. The cluster autoscaler will automatically backoff and retry across other zones (e.g., `us-central1-c`) until it finds availability.
 
 ---
 
-## 📊 Telemetry and Observability Setup
+## 💻 Local Testing UI
 
-GKE Autopilot enforces strict namespace boundaries and disallows host-privileged DaemonSets. Installing standard Helm charts like `kube-prometheus-stack` out-of-the-box fails. 
-
-### 1. Install Prometheus and Grafana (Autopilot Compatible)
-We bypass these restrictions by using [prometheus-values.yaml](monitoring/prometheus-values.yaml) to disable node-exporters and restricted control-plane metrics.
+To test the architecture end-to-end, a local Streamlit Chatbot (`streamlit_app.py`) is provided. It acts as the client, connecting to the LiteLLM Gateway via a local `kubectl port-forward`.
 
 ```bash
-kubectl create namespace monitoring || true
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
-helm install prometheus prometheus-community/kube-prometheus-stack \
-    -n monitoring \
-    -f monitoring/prometheus-values.yaml
+# Install dependencies
+pip install streamlit openai
+
+# Run the UI locally
+python3 -m streamlit run streamlit_app.py
 ```
-
-### 2. Scrape vLLM Metrics
-Apply the [service-monitor.yaml](k8s/service-monitor.yaml) configuration to register vLLM with the Prometheus target collector:
-```bash
-kubectl apply -f k8s/service-monitor.yaml
-```
-*Note: vLLM serves prometheus metrics on its main OpenAI API port (8000) under `/metrics`. The ServiceMonitor points to the `http` service endpoint to map this correctly.*
-
-### 3. Port-Forward Services
-To access Grafana and vLLM APIs locally:
-```bash
-# Port-forward Grafana
-kubectl port-forward svc/prometheus-grafana 3000:80 -n monitoring &
-
-# Port-forward vLLM
-kubectl port-forward svc/qwen-vllm-service 8000:80 -n kserve-test &
-```
-
-### 4. Import Grafana Dashboard
-1. Open Grafana at `http://localhost:3000` (User: `admin` / Password: `admin-gke-mlops`).
-2. Go to **Dashboards > New > Import**.
-3. Copy-paste the content of [grafana-dashboard.json](monitoring/grafana-dashboard.json) (or upload the file) and select the `Prometheus` datasource.
-
----
-
-## 🧪 Load Testing (Locust)
-
-The [locustfile.py](load-test/locustfile.py) load test sends streaming requests (`stream: true`) to the vLLM endpoint and calculates **TTFT (Time-to-First-Token)** and **ITL (Inter-Token Latency)** client-side.
-
-Run a headless load test simulating 5 concurrent users for 2 minutes:
-```bash
-locust --headless -u 5 -r 1 --run-time 2m --host http://localhost:8000
-```
-
-### Expected SLA Outputs (NVIDIA L4)
-Under concurrent retail shopping shopper simulations, you should observe:
-* **P90 Server TTFT:** **~34 ms** (time-to-first-token generation on GPU).
-* **P90 Server ITL:** **~9.0 ms** (time-per-output-token).
-* **Throughput:** ~110 tokens/sec.
-* **Error Rate:** 0.0%.
-
----
-
-## 💡 Key Troubleshooting Wins & Gotchas Resolved
-
-1. **GKE Autopilot Quota Deadlocks:** During rolling deployments, requesting a new GPU pod when quota is set to `1.0` results in scheduling failures because the old pod holds the GPU. Resolved by setting `spec.strategy.type: Recreate` to ensure the old container terminates before the new one starts.
-2. **GKE Autopilot Prometheus Restrictions:** Bypassed Helm installation blocks by disabling host-privileged `node-exporter` DaemonSets and disabling scraping of protected `kube-system` control-plane namespaces.
-3. **vLLM Metrics Port Alignment:** vLLM serves its `/metrics` endpoint on the primary listener port `8000`, not a separate port. Changed the `ServiceMonitor` endpoint from port `metrics` (8090) to `http` (8000) to resolve connection refused errors in Prometheus targets.
