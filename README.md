@@ -5,54 +5,65 @@ This repository demonstrates a production-grade, highly scalable, and observable
 ## 🏗 Architecture Diagram
 
 ```mermaid
-architecture-beta
-    group gcp(cloud)[Google Cloud Platform]
+flowchart TD
+    subgraph GCP["Google Cloud Platform"]
+        GCS[("Cloud Storage Bucket\n(Model Weights)")]
+        IAM["Workload Identity\n(IAM Service Accounts)"]
+        
+        subgraph VPC["VPC Network"]
+            ALB("External HTTP(S) Load Balancer")
+            
+            subgraph Cluster["GKE Autopilot Cluster"]
+                
+                subgraph NS_Ingress["Namespace: lite-llm"]
+                    Gateway["LiteLLM API Gateway\n(Deployment)"]
+                    Redis[("Redis StatefulSet\n(Rate Limiting & Budgets)")]
+                    Postgres[("PostgreSQL\n(Config Storage)")]
+                end
+                
+                subgraph NS_Serving["Namespace: kserve-test"]
+                    KServe{"KServe InferenceService\n(Knative Scale-to-Zero)"}
+                    vLLM["vLLM GPU Predictor Pod\n(NVIDIA T4 + PagedAttention)"]
+                    GCSFuse[/"GCS Fuse CSI Driver\n(Dynamic Mount)"/]
+                end
+                
+                subgraph NS_Monitoring["Namespace: monitoring"]
+                    Prometheus["Prometheus & Grafana\n(Metrics Scraping)"]
+                    Jaeger["Jaeger OTLP Collector\n(Distributed Tracing)"]
+                end
+                
+                subgraph NS_CD["Namespace: argocd"]
+                    Argo["ArgoCD GitOps\n(Continuous Delivery)"]
+                end
+                
+            end
+        end
+    end
+
+    %% Client Flow
+    User((User / Client App)) -- "OpenAI API Request" --> ALB
+    ALB --> Gateway
+    Gateway <--> Redis
+    Gateway <--> Postgres
     
-    group vpc(cloud)[VPC Network] in gcp
-    group cluster(cloud)[GKE Autopilot Cluster] in vpc
+    %% Serving Flow
+    Gateway -- "Forward Request" --> KServe
+    KServe --> vLLM
+    vLLM -- "Reads from Mount" --> GCSFuse
+    GCSFuse -- "Streams via CSI" --> GCS
 
-    %% Storage & IAM
-    service gcs(database)[Cloud Storage Bucket\nModel Weights] in gcp
-    service iam(server)[Workload Identity\nIAM Service Accounts] in gcp
-
-    %% Ingress & API Gateway Layer
-    group ingress_ns(group)[Namespace: lite-llm] in cluster
-    service alb(internet)[External HTTP(S) Load Balancer] in vpc
-    service litellm(server)[LiteLLM API Gateway\n(Deployment)] in ingress_ns
-    service redis(database)[Redis StatefulSet\nRate Limiting & Budgets] in ingress_ns
-    service pg(database)[PostgreSQL\nConfig Storage] in ingress_ns
-
-    %% Model Serving Layer
-    group serve_ns(group)[Namespace: kserve-test] in cluster
-    service kserve(server)[KServe InferenceService\n(Knative Scale-to-Zero)] in serve_ns
-    service vllm(server)[vLLM GPU Predictor Pod\n(NVIDIA T4 + PagedAttention)] in serve_ns
-    service gcsfuse(disk)[GCS Fuse CSI Driver\n(Dynamic Mount)] in serve_ns
-
-    %% Observability & CD Layer
-    group obs_ns(group)[Namespace: monitoring] in cluster
-    service prometheus(server)[Prometheus & Grafana\n(Metrics Scraping)] in obs_ns
-    service jaeger(server)[Jaeger OTLP Collector\n(Distributed Tracing)] in obs_ns
+    %% IAM Permissions
+    IAM -. "Grants Access" .-> vLLM
+    IAM -. "Grants Access" .-> GCSFuse
     
-    group cd_ns(group)[Namespace: argocd] in cluster
-    service argo(server)[ArgoCD GitOps\nContinuous Delivery] in cd_ns
-
-    %% Edges / Connections
-    alb:B --> litellm:T
-    litellm:R --> redis:L
-    litellm:B --> pg:T
+    %% Observability Flow
+    Gateway -. "Traces" .-> Jaeger
+    vLLM -. "Traces" .-> Jaeger
+    Prometheus -. "Scrapes Metrics" .-> vLLM
     
-    litellm:B --> kserve:T
-    kserve:B --> vllm:T
-    vllm:R --> gcsfuse:L
-    gcsfuse:R --> gcs:L
-
-    %% Observability edges
-    litellm:L --> jaeger:R
-    vllm:L --> jaeger:R
-    prometheus:R --> vllm:L
-    
-    iam:B --> vllm:T
-    iam:B --> gcsfuse:T
+    %% GitOps
+    Argo -. "Syncs Manifests" .-> NS_Ingress
+    Argo -. "Syncs Manifests" .-> NS_Serving
 ```
 
 ## 🚀 Key Components
