@@ -20,9 +20,7 @@ spec:
         args:
           - "--model=/mnt/models/Qwen2.5-0.5B-Instruct"
           - "--port=8080"
-          - "--gpu-memory-utilization=0.90"
           - "--max-model-len=4096"
-          - "--enable-prefix-caching"
           - "--otlp-traces-endpoint=http://jaeger-collector.monitoring.svc.cluster.local:4317"
         ports:
           - containerPort: 8080
@@ -34,19 +32,15 @@ spec:
           limits:
             cpu: "4"
             memory: "16Gi"
-            nvidia.com/gpu: "1"
           requests:
             cpu: "4"
             memory: "16Gi"
-            nvidia.com/gpu: "1"
         volumeMounts:
           - name: gcs-model-volume
             mountPath: /mnt/models
             readOnly: true
           - name: shm
             mountPath: /dev/shm
-    nodeSelector:
-      cloud.google.com/gke-accelerator: nvidia-tesla-t4
     volumes:
       - name: gcs-model-volume
         csi:
