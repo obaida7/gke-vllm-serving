@@ -5,49 +5,54 @@ This repository demonstrates a production-grade, highly scalable, and observable
 ## 🏗 Architecture Diagram
 
 ```mermaid
-flowchart TD
-    subgraph "External"
-        User[User / Client App]
-    end
-
-    subgraph "GKE Autopilot Cluster"
-        subgraph "Ingress & Routing (LiteLLM)"
-            Gateway[LiteLLM API Gateway]
-            Redis[(Redis Cache & Rate Limit)]
-            Postgres[(PostgreSQL DB)]
-        end
-
-        subgraph "Model Serving (KServe / Knative)"
-            vLLM[vLLM Inference Server]
-        end
-
-        subgraph "Observability & CD"
-            Argo[ArgoCD GitOps]
-            Prometheus[Prometheus / Grafana]
-            Jaeger[Jaeger Tracing OTLP]
-        end
-    end
-
-    subgraph "Google Cloud Platform"
-        GCS[(GCS Bucket: Model Weights)]
-    end
-
-    %% Flow
-    User -- "OpenAI API Request" --> Gateway
-    Gateway <--> Redis
-    Gateway <--> Postgres
-    Gateway -- "Forward Request" --> vLLM
-    vLLM -- "Stream Model Weights" --> GCS
+architecture-beta
+    group gcp(cloud)[Google Cloud Platform]
     
-    %% Telemetry
-    Gateway -. "Traces" .-> Jaeger
-    vLLM -. "Traces & Metrics" .-> Jaeger
-    Gateway -. "Metrics" .-> Prometheus
-    vLLM -. "Metrics" .-> Prometheus
+    group vpc(cloud)[VPC Network] in gcp
+    group cluster(cloud)[GKE Autopilot Cluster] in vpc
+
+    %% Storage & IAM
+    service gcs(database)[Cloud Storage Bucket\nModel Weights] in gcp
+    service iam(server)[Workload Identity\nIAM Service Accounts] in gcp
+
+    %% Ingress & API Gateway Layer
+    group ingress_ns(group)[Namespace: lite-llm] in cluster
+    service alb(internet)[External HTTP(S) Load Balancer] in vpc
+    service litellm(server)[LiteLLM API Gateway\n(Deployment)] in ingress_ns
+    service redis(database)[Redis StatefulSet\nRate Limiting & Budgets] in ingress_ns
+    service pg(database)[PostgreSQL\nConfig Storage] in ingress_ns
+
+    %% Model Serving Layer
+    group serve_ns(group)[Namespace: kserve-test] in cluster
+    service kserve(server)[KServe InferenceService\n(Knative Scale-to-Zero)] in serve_ns
+    service vllm(server)[vLLM GPU Predictor Pod\n(NVIDIA T4 + PagedAttention)] in serve_ns
+    service gcsfuse(disk)[GCS Fuse CSI Driver\n(Dynamic Mount)] in serve_ns
+
+    %% Observability & CD Layer
+    group obs_ns(group)[Namespace: monitoring] in cluster
+    service prometheus(server)[Prometheus & Grafana\n(Metrics Scraping)] in obs_ns
+    service jaeger(server)[Jaeger OTLP Collector\n(Distributed Tracing)] in obs_ns
     
-    %% GitOps
-    Argo -. "Sync Manifests" .-> Gateway
-    Argo -. "Sync Manifests" .-> vLLM
+    group cd_ns(group)[Namespace: argocd] in cluster
+    service argo(server)[ArgoCD GitOps\nContinuous Delivery] in cd_ns
+
+    %% Edges / Connections
+    alb:B --> litellm:T
+    litellm:R --> redis:L
+    litellm:B --> pg:T
+    
+    litellm:B --> kserve:T
+    kserve:B --> vllm:T
+    vllm:R --> gcsfuse:L
+    gcsfuse:R --> gcs:L
+
+    %% Observability edges
+    litellm:L --> jaeger:R
+    vllm:L --> jaeger:R
+    prometheus:R --> vllm:L
+    
+    iam:B --> vllm:T
+    iam:B --> gcsfuse:T
 ```
 
 ## 🚀 Key Components
